@@ -1,12 +1,20 @@
+import os
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from django.conf import settings
 from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework.test import APIRequestFactory
 
 from .models import ChatMessage
 from .services import generate_learning_response
 from .views import ChatAPIView
+
+
+class ProviderConfigurationTests(SimpleTestCase):
+    def test_groq_settings_are_loaded_from_environment(self):
+        self.assertEqual(settings.GROQ_API_KEY, os.getenv('GROQ_API_KEY', ''))
+        self.assertEqual(settings.GROQ_MODEL, os.getenv('GROQ_MODEL', ''))
 
 
 @override_settings(
