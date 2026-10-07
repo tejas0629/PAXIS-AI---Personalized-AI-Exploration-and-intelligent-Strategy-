@@ -75,6 +75,22 @@ DB_PORT=3306
 
 `GEMINI_MODEL` is intentionally not given a default. Set it to a model available to your Gemini account. Also set the MySQL username and password. Django and CORS settings are included in `.env.example` for local development.
 
+### CORS configuration
+
+Django CORS origins are controlled entirely through environment variables. Local development always includes `http://localhost:5173` and `http://127.0.0.1:5173`.
+
+```dotenv
+CORS_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,https://example.com
+DEV_TUNNEL_ORIGIN=https://your-dev-tunnel-name-1234.devtunnels.ms
+FRONTEND_URL=https://app.example.com
+```
+
+- `CORS_ALLOWED_ORIGINS`: comma-separated origins, including local origins. Values are trimmed and empty entries are removed.
+- `DEV_TUNNEL_ORIGIN`: optional HTTPS origin for a VS Code Dev Tunnel. Set it to the current tunnel URL at deployment time; do not hardcode a tunnel URL in source code.
+- `FRONTEND_URL`: optional production frontend origin. Set this to the deployed frontend URL when the backend is used outside the local development environment.
+
+Set `DEV_TUNNEL_ORIGIN` only when the tunnel origin is known, and set `FRONTEND_URL` only for the production frontend. Do not enable `CORS_ALLOW_ALL_ORIGINS`; it is intentionally not used. CSRF protections are unchanged.
+
 ## Virtual Environment Setup
 
 From the repository root on Linux:

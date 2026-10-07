@@ -272,11 +272,20 @@ def _is_temporary_gemini_error(exc):
     )
 
 
+def _message_field(item, field_name):
+    if isinstance(item, dict):
+        return item.get(field_name)
+    return getattr(item, field_name, None)
+
+
 def _provider_history(message, conversation_history):
     if not conversation_history:
         return message
     return [
-        {'role': 'user' if item.role == 'user' else 'model', 'parts': [{'text': item.message}]}
+        {
+            'role': 'user' if _message_field(item, 'role') == 'user' else 'model',
+            'parts': [{'text': _message_field(item, 'message')}],
+        }
         for item in conversation_history
     ] + [{'role': 'user', 'parts': [{'text': message}]}]
 
@@ -284,7 +293,10 @@ def _provider_history(message, conversation_history):
 def _groq_messages(message, conversation_history):
     messages = [{'role': 'system', 'content': SYSTEM_PROMPT}]
     messages.extend(
-        {'role': item.role, 'content': item.message}
+        {
+            'role': _message_field(item, 'role'),
+            'content': _message_field(item, 'message'),
+        }
         for item in conversation_history or []
     )
     messages.append({'role': 'user', 'content': message})

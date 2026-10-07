@@ -3,7 +3,9 @@ import { useEffect, useRef, useState } from 'react';
 export default function ChatPanel({ messages, onSend, onClear, loading, error }) {
   const [text, setText] = useState('');
   const endRef = useRef(null);
-  useEffect(() => endRef.current?.scrollIntoView({ behavior: 'smooth' }), [messages, loading]);
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, loading]);
   const submit = (event) => {
     event.preventDefault();
     if (text.trim() && !loading) {

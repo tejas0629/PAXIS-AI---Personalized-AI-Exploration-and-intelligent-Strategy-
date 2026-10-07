@@ -5,9 +5,10 @@
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {
-    "vite": "latest",
+    "idb": "^8.0.4",
     "react": "latest",
-    "react-dom": "latest"
-  },
-  "devDependencies": {}
+    "react-dom": "latest",
+    "vite": "latest",
+    "vite-plugin-pwa": "^2.0.0"
+  }
 }

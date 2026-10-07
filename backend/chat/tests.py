@@ -3,10 +3,9 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from django.conf import settings
-from django.test import SimpleTestCase, TestCase, override_settings
+from django.test import SimpleTestCase, override_settings
 from rest_framework.test import APIRequestFactory
 
-from .models import ChatMessage
 from .services import generate_learning_response
 from .views import ChatAPIView
 
@@ -168,16 +167,20 @@ class ProviderFallbackTests(SimpleTestCase):
         self.assertEqual(response, 'Roadmap ready')
         self.assertEqual(roadmap, {'steps': [{'title': 'Java syntax'}]})
 
-    @patch('chat.views.ChatMessage.objects.create')
-    @patch('chat.views.Conversation.objects.create')
     @patch('chat.services.Groq')
     @patch('chat.services.genai.Client')
-    def test_groq_failure_returns_safe_api_error(self, gemini_client, groq_client, create_conversation, create_message):
+    def test_groq_failure_returns_safe_api_error(self, gemini_client, groq_client):
         gemini_client.return_value = self.make_gemini_client(error=TimeoutError())
         groq_client.return_value = self.make_groq_client(error=RuntimeError('provider detail must stay hidden'))
-        create_conversation.return_value.id = 1
-        create_conversation.return_value.messages.order_by.return_value = []
-        request = APIRequestFactory().post('/api/chat/', {'message': 'Create a roadmap.'}, format='json')
+        request = APIRequestFactory().post(
+            '/api/chat/',
+            {
+                'message': 'Create a roadmap.',
+                'conversation_id': 'client-conversation-id',
+                'messages': [{'role': 'user', 'message': 'Previous goal'}],
+            },
+            format='json',
+        )
 
         response = ChatAPIView.as_view()(request)
 
@@ -201,29 +204,33 @@ class ProviderFallbackTests(SimpleTestCase):
     GEMINI_MODEL='gemini-test-model',
     DEBUG=False,
 )
-class ConversationApiTests(TestCase):
+class StatelessConversationApiTests(SimpleTestCase):
     @patch('chat.views.generate_learning_response')
-    def test_conversation_id_preserves_and_isolates_history(self, generate_response):
-        generate_response.side_effect = [
-            ('Java response', None),
-            ('Java follow-up', None),
-            ('Python response', None),
-        ]
-        first_request = APIRequestFactory().post('/api/chat/', {'message': 'I want Java.'}, format='json')
-        first_response = ChatAPIView.as_view()(first_request)
-        conversation_id = first_response.data['conversation_id']
-
-        second_request = APIRequestFactory().post(
+    def test_client_history_and_conversation_id_are_forwarded(self, generate_response):
+        generate_response.return_value = ('Response', None)
+        request = APIRequestFactory().post(
             '/api/chat/',
-            {'message': 'Current experience 0.', 'conversation_id': conversation_id},
+            {
+                'message': 'Create a roadmap.',
+                'conversation_id': 'client-uuid',
+                'messages': [
+                    {'role': 'user', 'message': 'I want Java.'},
+                    {'role': 'assistant', 'message': 'Java response.'},
+                ],
+            },
             format='json',
         )
-        ChatAPIView.as_view()(second_request)
-        other_request = APIRequestFactory().post('/api/chat/', {'message': 'I want Python.'}, format='json')
-        ChatAPIView.as_view()(other_request)
 
-        first_history = generate_response.call_args_list[1].args[1]
-        second_history = generate_response.call_args_list[2].args[1]
-        self.assertEqual([message.message for message in first_history], ['I want Java.', 'Java response'])
-        self.assertEqual([message.message for message in second_history], [])
-        self.assertEqual(ChatMessage.objects.filter(conversation_id=conversation_id).count(), 4)
+        response = ChatAPIView.as_view()(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['conversation_id'], 'client-uuid')
+        self.assertEqual(response.data['response'], 'Response')
+        forwarded_history = generate_response.call_args.args[1]
+        self.assertEqual(
+            forwarded_history,
+            [
+                {'role': 'user', 'message': 'I want Java.'},
+                {'role': 'assistant', 'message': 'Java response.'},
+            ],
+        )
