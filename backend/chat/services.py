@@ -176,12 +176,23 @@ def _enrich_roadmap_events(client, roadmap, model):
     candidates = []
     topics = _roadmap_topics(roadmap)
     for index, topic in enumerate(topics, start=1):
-        yield 'search', {'index': index, 'total': len(topics), 'topic': topic}
         query = f'{topic} {level} tutorial'
         if settings.DEBUG:
             logger.info('[Serper] Searching for topic: %s', topic)
         try:
+            yield 'search', {
+                'index': index,
+                'total': len(topics),
+                'topic': topic,
+                'search_type': 'web',
+            }
             website_results = _serper_search(query, 'search')
+            yield 'search', {
+                'index': index,
+                'total': len(topics),
+                'topic': topic,
+                'search_type': 'videos',
+            }
             video_results = _serper_search(query, 'videos')
         except Exception as exc:
             if settings.DEBUG:
@@ -512,7 +523,17 @@ def stream_learning_response(message, conversation_history=None):
                     if event_type == 'search':
                         yield {
                             'type': 'progress',
-                            'message': f"Searching for relevant resources: {event_data['topic']} ({event_data['index']}/{event_data['total']})...",
+                            'message': (
+                                f"Finding relevant videos for {event_data['topic']} "
+                                f"({event_data['index']}/{event_data['total']})..."
+                                if event_data['search_type'] == 'videos'
+                                else f"Searching for relevant resources: {event_data['topic']} "
+                                f"({event_data['index']}/{event_data['total']})..."
+                            ),
+                            'topic': event_data['topic'],
+                            'search_kind': event_data['search_type'],
+                            'index': event_data['index'],
+                            'total': event_data['total'],
                         }
                     elif event_type == 'roadmap':
                         roadmap = event_data

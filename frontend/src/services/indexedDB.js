@@ -40,17 +40,32 @@ export async function loadConversations() {
     database.getAll(STORE_NAMES.messages),
     database.getAll(STORE_NAMES.roadmaps),
   ]);
-  const roadmapByConversation = Object.fromEntries(
-    roadmapRecords.map((record) => [record.conversationId, record.roadmap]),
+  const roadmapByConversation = new Map(
+    roadmapRecords
+      .filter((record) => record && typeof record.conversationId === 'string')
+      .map((record) => [record.conversationId, record]),
   );
   return conversations
-    .map((conversation) => ({
-      ...conversation,
-      messages: messages
-        .filter((message) => message.conversationId === conversation.id)
-        .sort((left, right) => new Date(left.createdAt) - new Date(right.createdAt)),
-      roadmap: roadmapByConversation[conversation.id] || null,
-    }))
+    .filter((conversation) => conversation && typeof conversation.id === 'string')
+    .map((conversation) => {
+      const conversationMessages = messages
+        .filter((message) => message && message.conversationId === conversation.id && typeof message.id === 'string')
+        .sort((left, right) => new Date(left.createdAt) - new Date(right.createdAt));
+      const firstUserMessage = conversationMessages.find((message) => message.role === 'user')?.content;
+      const inferredTitle = typeof firstUserMessage === 'string'
+        ? (firstUserMessage.replace(/\s+/g, ' ').trim().slice(0, 39) || 'New chat')
+        : 'New chat';
+      return {
+        ...conversation,
+        messages: conversationMessages,
+        roadmap: roadmapByConversation.get(conversation.id)?.roadmap || null,
+        completedItems: roadmapByConversation.get(conversation.id)?.completedItems || [],
+        createdAt: conversation.createdAt || conversation.updatedAt || new Date().toISOString(),
+        updatedAt: conversation.updatedAt || conversation.createdAt || new Date().toISOString(),
+        title: conversation.title || inferredTitle,
+        manualTitle: conversation.manualTitle || false,
+      };
+    })
     .sort((left, right) => new Date(right.updatedAt) - new Date(left.updatedAt));
 }
 
@@ -66,13 +81,26 @@ export async function saveMessage(message) {
 
 export async function saveRoadmap(conversationId, roadmap) {
   const database = await getDatabase();
+  const existing = await database.get(STORE_NAMES.roadmaps, conversationId);
   const record = {
     id: conversationId,
     conversationId,
     roadmap,
+    completedItems: existing?.completedItems || [],
     createdAt: new Date().toISOString(),
   };
   await database.put(STORE_NAMES.roadmaps, record);
+}
+
+export async function saveRoadmapProgress(conversationId, completedItems) {
+  const database = await getDatabase();
+  const existing = await database.get(STORE_NAMES.roadmaps, conversationId);
+  if (!existing) return;
+  await database.put(STORE_NAMES.roadmaps, {
+    ...existing,
+    completedItems,
+    updatedAt: new Date().toISOString(),
+  });
 }
 
 export async function clearConversation(conversationId) {
@@ -80,6 +108,18 @@ export async function clearConversation(conversationId) {
   const messages = await database.getAll(STORE_NAMES.messages);
   const messageIds = messages
     .filter((message) => message.conversationId === conversationId)
+    .map((message) => message.id);
+  await Promise.all([
+    ...messageIds.map((id) => database.delete(STORE_NAMES.messages, id)),
+    database.delete(STORE_NAMES.roadmaps, conversationId),
+  ]);
+}
+
+export async function deleteConversation(conversationId) {
+  const database = await getDatabase();
+  const messages = await database.getAll(STORE_NAMES.messages);
+  const messageIds = messages
+    .filter((message) => message?.conversationId === conversationId)
     .map((message) => message.id);
   await Promise.all([
     ...messageIds.map((id) => database.delete(STORE_NAMES.messages, id)),

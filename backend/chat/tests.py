@@ -298,9 +298,12 @@ class ProviderFallbackTests(SimpleTestCase):
 
         event_types = [event['type'] for event in events]
         search_events = [event for event in events if event['type'] == 'progress' and event['message'].startswith('Searching')]
+        resource_events = [event for event in events if event['type'] == 'progress' and event.get('topic')]
         first_roadmap_index = event_types.index('roadmap')
         first_search_index = events.index(search_events[0])
         self.assertEqual(len(search_events), 2)
+        self.assertEqual([event['search_kind'] for event in resource_events], ['web', 'videos', 'web', 'videos'])
+        self.assertEqual([event['index'] for event in resource_events], [1, 1, 2, 2])
         self.assertLess(first_roadmap_index, first_search_index)
         self.assertIn('Variables (1/2)', search_events[0]['message'])
         self.assertIn('Classes (2/2)', search_events[1]['message'])

@@ -45,7 +45,7 @@ export async function streamChatMessage(message, conversationId, messages, onEve
   let completedEvent = null;
   let streamEnded = false;
 
-  const dispatch = (block) => {
+  const dispatch = async (block) => {
     const data = block
       .split('\n')
       .filter((line) => line.startsWith('data:'))
@@ -60,7 +60,7 @@ export async function streamChatMessage(message, conversationId, messages, onEve
     }
     if (event.type === 'error') throw new Error(event.message || 'The assistant could not complete the response.');
     if (event.type === 'done') completedEvent = event;
-    onEvent(event);
+    await onEvent(event);
   };
 
   try {
@@ -69,7 +69,7 @@ export async function streamChatMessage(message, conversationId, messages, onEve
       buffer += decoder.decode(value, { stream: !done }).replace(/\r\n/g, '\n');
       let boundary = buffer.indexOf('\n\n');
       while (boundary !== -1) {
-        dispatch(buffer.slice(0, boundary));
+        await dispatch(buffer.slice(0, boundary));
         buffer = buffer.slice(boundary + 2);
         boundary = buffer.indexOf('\n\n');
       }
@@ -78,7 +78,7 @@ export async function streamChatMessage(message, conversationId, messages, onEve
         break;
       }
     }
-    if (buffer.trim()) dispatch(buffer);
+    if (buffer.trim()) await dispatch(buffer);
   } finally {
     if (!streamEnded) await reader.cancel().catch(() => {});
     reader.releaseLock();

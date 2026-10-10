@@ -3,10 +3,17 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#6d28d9" />
+    <meta name="theme-color" content="#f5f8fc" />
     <meta name="description" content="PAXIS AI personalized learning roadmap assistant" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <title>PAXIS AI</title>
+    <script>
+      try {
+        document.documentElement.dataset.theme = localStorage.getItem('paxis-theme') === 'dark' ? 'dark' : 'light';
+      } catch {
+        document.documentElement.dataset.theme = 'light';
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

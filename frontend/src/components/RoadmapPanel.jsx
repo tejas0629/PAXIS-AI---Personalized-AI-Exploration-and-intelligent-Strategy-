@@ -2,30 +2,48 @@ function ResourceLinks({ material }) {
   return (
     <div className="resourceLinks">
       {material?.website?.url && (
-        <a href={material.website.url} target="_blank" rel="noopener noreferrer" aria-label={`Open ${material.website.name}`} title={material.website.name}>
-          <svg className="resourceIcon websiteIcon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3c2.4 2.5 3.6 5.5 3.6 9s-1.2 6.5-3.6 9c-2.4-2.5-3.6-5.5-3.6-9S9.6 5.5 12 3Z" /></svg>
-          <span>Learn on {material.website.name}</span>
+        <a href={material.website.url} target="_blank" rel="noopener noreferrer" aria-label={`Open ${material.website.name}`}>
+          <span className="resourceType">WEB</span>
+          <span>
+            <span className="resourceTitle">{material.website.name}</span>
+            {material.website.reason && <span className="resourceReason">{material.website.reason}</span>}
+          </span>
+          <span className="externalArrow" aria-hidden="true">↗</span>
         </a>
       )}
       {material?.youtube?.url && (
-        <a href={material.youtube.url} target="_blank" rel="noopener noreferrer" aria-label={`Watch ${material.youtube.title}`} title={material.youtube.title}>
-          <svg className="resourceIcon youtubeIcon" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="5" width="20" height="14" rx="4" /><path d="m10 9 5 3-5 3Z" /></svg>
-          <span>Watch on YouTube</span>
+        <a href={material.youtube.url} target="_blank" rel="noopener noreferrer" aria-label={`Watch ${material.youtube.title}`}>
+          <span className="resourceType videoType">VIDEO</span>
+          <span>
+            <span className="resourceTitle">{material.youtube.title}</span>
+            {material.youtube.channel && <span className="resourceReason">{material.youtube.channel}</span>}
+          </span>
+          <span className="externalArrow" aria-hidden="true">↗</span>
         </a>
       )}
     </div>
   );
 }
 
-export default function RoadmapPanel({ roadmap, progress = '' }) {
+function ResourceSkeleton({ label }) {
+  return (
+    <div className="resourceSkeleton" role="status" aria-label={label}>
+      <span />
+      <span />
+      <span />
+    </div>
+  );
+}
+
+export default function RoadmapPanel({ roadmap, progress = '', searching = null, completedItems = [], onToggleProgress }) {
   if (!roadmap) {
     return (
       <aside className="roadmapCard empty">
-        <div className="emptyIcon">🗺️</div>
-        <h2>Your Personalized Learning Path</h2>
-        <p>{progress || "Tell me your learning goal in the chat and I'll create your roadmap."}</p>
-        {progress && <span className="roadmapLoading" role="status"><i /><i /><i /></span>}
-        <div className="hint">Note: “SARP can make mistakes while routing. check Information”</div>
+        <div className="roadmapEyebrow">YOUR LEARNING PATH</div>
+        <div className="emptyRoadmapGlyph" aria-hidden="true">↗</div>
+        <h2>{progress ? 'Planning your learning path' : 'Your roadmap starts here'}</h2>
+        <p>{progress || 'Tell PAXIS what you want to learn. Your roadmap and resources will appear here.'}</p>
+        {progress && <ResourceSkeleton label="Planning your learning path" />}
       </aside>
     );
   }
@@ -34,27 +52,43 @@ export default function RoadmapPanel({ roadmap, progress = '' }) {
     <aside className="roadmapCard">
       {progress && <div className="roadmapProgress" role="status">{progress}</div>}
       <div className="roadmapHero">
-        <div className="heroIcon">🎯</div>
         <div>
-          <p>Goal</p>
+          <p>PERSONALIZED ROADMAP</p>
           <h2>{roadmap.goal || 'Personalized Learning Goal'}</h2>
           <span>{roadmap.duration || 'Flexible timeline'} · {roadmap.starting_level || 'Level not specified'}</span>
         </div>
       </div>
       <div className="timeline">
         {(roadmap.steps || []).map((step, index) => (
-          <div className="timelineItem" key={`${step.title}-${index}`}>
-            <div className="stepBadge">{index + 1}</div>
+          <article className="timelineItem" key={`${step.title}-${index}`}>
+            <div className="stepIndex">{String(index + 1).padStart(2, '0')}</div>
             <div className="stepCard">
               <div className="stepMeta">{step.duration || `Stage ${index + 1}`}</div>
               <h3>{step.title}</h3>
-              <p>{step.description}</p>
-              <ul>
-                {(step.topics || []).map((topic) => <li key={topic}>{topic}</li>)}
-              </ul>
+              {step.description && <p>{step.description}</p>}
+              {!!step.topics?.length && (
+                <ul className="roadmapTopics">
+                  {step.topics.map((topic, topicIndex) => {
+                    const progressId = `${index}:${topicIndex}`;
+                    return (
+                      <li key={progressId}>
+                        <label className="topicCheck">
+                          <input
+                            type="checkbox"
+                            checked={completedItems.includes(progressId)}
+                            onChange={() => onToggleProgress?.(progressId)}
+                            aria-label={`Mark ${topic} ${completedItems.includes(progressId) ? 'incomplete' : 'complete'}`}
+                          />
+                          <span>{topic}</span>
+                        </label>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
               {step.study_material && (
                 <div className="studyMaterial">
-                  <strong>Study Material</strong>
+                  <strong>Study material</strong>
                   <ResourceLinks material={step.study_material} />
                 </div>
               )}
@@ -64,14 +98,20 @@ export default function RoadmapPanel({ roadmap, progress = '' }) {
                   <ResourceLinks material={item.study_material} />
                 </div>
               ))}
+              {searching && (step.topics || [step.title]).includes(searching.topic) && (
+                <div className="searchingResources">
+                  <span>{searching.kind === 'videos' ? 'Finding relevant videos…' : `Finding study resources for ${step.duration || `Stage ${index + 1}`}…`}</span>
+                  <ResourceSkeleton label="Searching for study resources" />
+                </div>
+              )}
             </div>
-          </div>
+          </article>
         ))}
       </div>
       {!!roadmap.projects?.length && (
         <div className="miniSection">
           <h3>Projects</h3>
-          {roadmap.projects.map((p) => <p key={p}>✅ {p}</p>)}
+          {roadmap.projects.map((project) => <p key={project}>{project}</p>)}
         </div>
       )}
       {roadmap.next_action && (
