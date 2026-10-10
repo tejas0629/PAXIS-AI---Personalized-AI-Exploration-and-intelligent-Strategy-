@@ -2,30 +2,30 @@
 
 ## Overview
 
-Phase 1 is a full-stack application that turns a natural-language learning goal into a personalized AI response and structured learning roadmap. The React interface sends messages to Django; only Django calls the AI providers.
+PAXIS AI turns a natural-language learning goal into a personalized response and structured roadmap. The React interface receives assistant text, progress, and roadmap updates over Server-Sent Events (SSE); only Django calls the AI providers.
 
 ## Tech Stack
 
 - Frontend: React, Vite, JavaScript, CSS
 - Backend: Python, Django, Django REST Framework
 - AI: Google Gemini through the official `google-genai` Python SDK, with Groq fallback through its official Python SDK
-- Database: MySQL through the Django ORM
+- Chat persistence: browser IndexedDB; Django uses local SQLite for framework data
 - Configuration: `.env` loaded by `python-dotenv`
 
 ## Architecture
 
 ```text
-React Frontend -> Django REST API -> Google Gemini
-      ^                  |                |
-      |                  v                v
-      +----------- response JSON <--------+-- Groq fallback
-                         |
-                       MySQL
+React Frontend --POST--> Django SSE endpoint --> Gemini stream
+  ^                         |                 Groq stream fallback
+  |                         +--> Serper searches and roadmap events
+  +------ text, progress, roadmap events
+  |
+  +------ conversations, messages, and roadmaps in browser IndexedDB
 ```
 
-Gemini and database credentials remain server-side. The frontend receives only the assistant response and optional roadmap data.
+Gemini, Groq, and Serper credentials remain server-side. Django does not store chat transcripts; the browser keeps conversations, messages, and roadmaps in IndexedDB and supplies the selected conversation history with each request.
 
-Each chat uses a conversation ID. A new chat creates a new ID; subsequent requests send that ID so Django retrieves and persists only that conversation's ordered messages. The selected conversation history is supplied to Gemini, or to Groq when the existing temporary-failure fallback is used. Conversations remain stored independently in MySQL.
+Each chat uses a client-generated conversation ID. A new chat creates a new ID; subsequent requests send that ID and the selected conversation history. The same history is supplied to Gemini or to Groq when the temporary-failure fallback is used.
 
 ## Study Material Suggester
 
@@ -73,7 +73,7 @@ DB_HOST=localhost
 DB_PORT=3306
 ```
 
-`GEMINI_MODEL` is intentionally not given a default. Set it to a model available to your Gemini account. Also set the MySQL username and password. Django and CORS settings are included in `.env.example` for local development.
+`GEMINI_MODEL` is intentionally not given a default. Set it to a model available to your Gemini account. Django and CORS settings are included in `.env.example` for local development.
 
 ### CORS configuration
 
@@ -103,15 +103,9 @@ pip install -r backend/requirements.txt
 
 The virtual environment is ignored and must not be committed.
 
-## MySQL Setup
+## Local Database and Chat Persistence
 
-Create the database before migrating:
-
-```sql
-CREATE DATABASE ai_learning_path CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-```
-
-Put the MySQL connection values in `.env`, then run:
+The local Django settings use SQLite. Chat messages and roadmaps are stored only in browser IndexedDB; no MySQL service or server-side chat persistence is used. Run migrations only when Django framework tables are needed:
 
 ```bash
 cd backend
@@ -176,6 +170,8 @@ Open `http://localhost:5173`. To use another backend URL, set `VITE_API_BASE_URL
 
 ### `POST /api/chat/`
 
+The original JSON endpoint remains available for non-streaming consumers.
+
 Request:
 
 ```json
@@ -203,13 +199,26 @@ Success response:
 
 The `roadmap` field is optional. Empty messages are rejected with a validation error. Gemini failures and malformed structured responses return safe error messages without secrets or stack traces.
 
+### `POST /api/chat/stream/`
+
+The chat UI uses this endpoint for genuine provider-native streaming. It returns `text/event-stream`; each `data:` frame contains one JSON event:
+
+```json
+{"type":"progress","message":"Understanding your learning goal..."}
+{"type":"chunk","text":"The assistant's next text fragment"}
+{"type":"roadmap","roadmap":{"goal":"...","steps":[]}}
+{"type":"done","roadmap":null,"conversation_id":"..."}
+```
+
+Roadmap events may contain complete steps before the full roadmap is finished. Resource-search progress is emitted as each Serper topic search begins. The response includes `X-Accel-Buffering: no`; production reverse proxies must preserve streaming and disable response buffering. This project currently uses Django's synchronous WSGI setup and synchronous provider SDKs. Deploy it with a WSGI server that supports streaming; an ASGI deployment needs an async bridge to avoid buffering synchronous iterators.
+
 ## Phase 1 Features
 
 - Natural-language English, Hindi, and Hinglish learning requests
-- AI assistant chat with Enter-to-send, loading, error, auto-scroll, and Clear Chat states
+- AI assistant chat with provider-native streaming, Stop, progress, error, auto-scroll, and Clear Chat states
 - Dynamic structured roadmap timeline with topics, projects, and next action
-- Simple `ChatMessage` persistence through Django ORM
-- MySQL and Gemini configuration through environment variables
+- Client-side conversation, message, and roadmap persistence through IndexedDB
+- Gemini, Groq, and Serper configuration through backend environment variables
 
 ## Example Usage
 
@@ -220,7 +229,7 @@ Mujhe roadmap de do.
 
 ## Current Status
 
-The Phase 1 React UI, Django endpoint, Gemini integration, roadmap rendering, environment configuration, and setup documentation are implemented. Automated syntax/build checks are available; a live Gemini request requires valid user-provided Gemini and MySQL credentials.
+The React UI, Django JSON and SSE endpoints, Gemini/Groq integrations, Serper enrichment, roadmap rendering, and IndexedDB persistence are implemented. Live provider calls require valid server-side provider credentials.
 
 ## Future Roadmap
 

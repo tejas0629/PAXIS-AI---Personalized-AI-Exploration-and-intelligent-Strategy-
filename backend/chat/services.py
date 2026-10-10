@@ -168,12 +168,15 @@ def _roadmap_topics(roadmap):
     return topics
 
 
-def _enrich_roadmap_with_study_material(client, roadmap, model):
+def _enrich_roadmap_events(client, roadmap, model):
     if not settings.SERPER_API_KEY:
-        return roadmap
+        yield 'roadmap', roadmap
+        return
     level = roadmap.get('starting_level', 'beginner')
     candidates = []
-    for topic in _roadmap_topics(roadmap):
+    topics = _roadmap_topics(roadmap)
+    for index, topic in enumerate(topics, start=1):
+        yield 'search', {'index': index, 'total': len(topics), 'topic': topic}
         query = f'{topic} {level} tutorial'
         if settings.DEBUG:
             logger.info('[Serper] Searching for topic: %s', topic)
@@ -189,7 +192,8 @@ def _enrich_roadmap_with_study_material(client, roadmap, model):
         candidates.append({'topic': topic, 'website_results': website_results, 'video_results': video_results})
 
     if not candidates:
-        return roadmap
+        yield 'roadmap', roadmap
+        return
     prompt = f'{STUDY_MATERIAL_PROMPT}\n{json.dumps(candidates)}'
     result = client.models.generate_content(
         model=model,
@@ -198,16 +202,19 @@ def _enrich_roadmap_with_study_material(client, roadmap, model):
     )
     response_text = (getattr(result, 'text', '') or '').strip()
     if not response_text:
-        return roadmap
+        yield 'roadmap', roadmap
+        return
     try:
         payload = json.loads(response_text)
     except json.JSONDecodeError:
-        return roadmap
+        yield 'roadmap', roadmap
+        return
     enriched_roadmap = dict(roadmap)
     selected_by_topic = {}
     selected = payload.get('topics') if isinstance(payload, dict) else None
     if not isinstance(selected, list):
-        return roadmap
+        yield 'roadmap', roadmap
+        return
     for item in selected:
         if not isinstance(item, dict) or not isinstance(item.get('topic'), str):
             continue
@@ -235,6 +242,14 @@ def _enrich_roadmap_with_study_material(client, roadmap, model):
             enriched_step['topic_materials'] = topic_materials
         enriched_steps.append(enriched_step)
     enriched_roadmap['steps'] = enriched_steps
+    yield 'roadmap', enriched_roadmap
+
+
+def _enrich_roadmap_with_study_material(client, roadmap, model):
+    enriched_roadmap = roadmap
+    for event_type, event_data in _enrich_roadmap_events(client, roadmap, model):
+        if event_type == 'roadmap':
+            enriched_roadmap = event_data
     return enriched_roadmap
 
 
@@ -270,6 +285,244 @@ def _is_temporary_gemini_error(exc):
     return isinstance(exc, (ConnectionError, TimeoutError, socket.timeout)) or any(
         name in error_name for name in temporary_names
     )
+
+
+class _JsonStringFieldStream:
+    def __init__(self, field_name):
+        self.field_pattern = re.compile(rf'"{re.escape(field_name)}"\s*:\s*"')
+        self.buffer = ''
+        self.position = 0
+        self.started = False
+        self.finished = False
+
+    def feed(self, fragment):
+        self.buffer += fragment
+        if self.finished:
+            return ''
+        if not self.started:
+            match = self.field_pattern.search(self.buffer)
+            if not match:
+                return ''
+            self.position = match.end()
+            self.started = True
+
+        decoded = []
+        while self.position < len(self.buffer):
+            character = self.buffer[self.position]
+            if character == '"':
+                self.finished = True
+                self.position += 1
+                break
+            if character == '\\':
+                if self.position + 1 >= len(self.buffer):
+                    break
+                escape_end = self.position + 2
+                if self.buffer[self.position + 1] == 'u':
+                    escape_end = self.position + 6
+                    if escape_end > len(self.buffer):
+                        break
+                escaped = self.buffer[self.position:escape_end]
+                try:
+                    decoded.append(json.loads(f'"{escaped}"'))
+                except json.JSONDecodeError:
+                    break
+                self.position = escape_end
+                continue
+            decoded.append(character)
+            self.position += 1
+        return ''.join(decoded)
+
+
+def _partial_roadmap(raw_response):
+    roadmap_match = re.search(r'"roadmap"\s*:\s*\{', raw_response)
+    if not roadmap_match:
+        return None
+
+    decoder = json.JSONDecoder()
+    object_start = roadmap_match.end() - 1
+    roadmap_prefix = raw_response[object_start:]
+    goal_match = re.search(r'(?<!\\)"goal"\s*:\s*', roadmap_prefix)
+    steps_match = re.search(r'(?<!\\)"steps"\s*:\s*\[', roadmap_prefix)
+    if not goal_match or not steps_match:
+        return None
+
+    goal_start = object_start + goal_match.end()
+    try:
+        goal, _ = decoder.raw_decode(raw_response, goal_start)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(goal, str) or not goal.strip():
+        return None
+
+    steps_start = object_start + steps_match.end()
+    position = steps_start
+    steps = []
+    while position < len(raw_response):
+        while position < len(raw_response) and (raw_response[position].isspace() or raw_response[position] == ','):
+            position += 1
+        if position >= len(raw_response) or raw_response[position] == ']':
+            break
+        try:
+            step, end = decoder.raw_decode(raw_response, position)
+        except json.JSONDecodeError:
+            break
+        if not isinstance(step, dict) or not isinstance(step.get('title'), str) or not step['title'].strip():
+            break
+        steps.append(step)
+        position = end
+
+    if not steps:
+        return None
+    partial = {'goal': goal, 'steps': steps}
+    for field in ('duration', 'starting_level'):
+        field_match = re.search(rf'(?<!\\)"{field}"\s*:\s*', roadmap_prefix)
+        if field_match:
+            value_start = object_start + field_match.end()
+            try:
+                value, _ = decoder.raw_decode(raw_response, value_start)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, str):
+                partial[field] = value
+    return partial
+
+
+def _stream_response_chunks(iterator, provider):
+    field_stream = _JsonStringFieldStream('response')
+    raw_response = []
+    try:
+        for chunk in iterator:
+            if provider == 'Gemini':
+                fragment = getattr(chunk, 'text', '') or ''
+            else:
+                choices = getattr(chunk, 'choices', [])
+                delta = getattr(choices[0], 'delta', None) if choices else None
+                fragment = getattr(delta, 'content', '') or ''
+            raw_response.append(fragment)
+            visible_text = field_stream.feed(fragment)
+            yield fragment, visible_text
+    finally:
+        close = getattr(iterator, 'close', None)
+        if close:
+            try:
+                close()
+            except Exception:
+                logger.debug('[AI] Provider stream cleanup failed.')
+    return ''.join(raw_response)
+
+
+def stream_learning_response(message, conversation_history=None):
+    yield {'type': 'progress', 'message': 'Understanding your learning goal...'}
+    provider = 'Gemini'
+    client = None
+    iterator = None
+    raw_parts = []
+    response_parts = []
+    build_status_sent = False
+    partial_step_count = 0
+
+    try:
+        if not settings.GEMINI_API_KEY:
+            raise GeminiConfigurationError('Gemini API key is not configured. Set GEMINI_API_KEY in .env.')
+        if not settings.GEMINI_MODEL:
+            raise GeminiConfigurationError('Gemini model is not configured. Set GEMINI_MODEL in .env.')
+        client = genai.Client(
+            api_key=settings.GEMINI_API_KEY,
+            http_options=types.HttpOptions(timeout=120_000),
+        )
+        iterator = client.models.generate_content_stream(
+            model=settings.GEMINI_MODEL,
+            contents=_provider_history(message, conversation_history),
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                response_mime_type='application/json',
+            ),
+        )
+        for fragment, visible_text in _stream_response_chunks(iterator, 'Gemini'):
+            raw_parts.append(fragment)
+            accumulated_raw = ''.join(raw_parts)
+            if not build_status_sent and re.search(r'"roadmap"\s*:\s*\{', accumulated_raw):
+                yield {'type': 'progress', 'message': 'Building your learning roadmap...'}
+                build_status_sent = True
+            partial_roadmap = _partial_roadmap(accumulated_raw)
+            if partial_roadmap and len(partial_roadmap['steps']) > partial_step_count:
+                partial_step_count = len(partial_roadmap['steps'])
+                yield {'type': 'roadmap', 'roadmap': partial_roadmap}
+            if visible_text:
+                response_parts.append(visible_text)
+                yield {'type': 'chunk', 'text': visible_text}
+    except Exception as gemini_error:
+        if iterator and hasattr(iterator, 'close'):
+            iterator.close()
+        if not _is_temporary_gemini_error(gemini_error) or response_parts:
+            yield {'type': 'error', 'message': 'The AI service could not complete this response. Please try again.'}
+            return
+        provider = 'Groq'
+        raw_parts = []
+        response_parts = []
+        partial_step_count = 0
+        yield {'type': 'progress', 'message': 'Gemini is unavailable; trying the fallback provider...'}
+        try:
+            if not settings.GROQ_API_KEY or not settings.GROQ_MODEL:
+                raise GroqConfigurationError('Groq is not configured.')
+            client = Groq(api_key=settings.GROQ_API_KEY)
+            iterator = client.chat.completions.create(
+                model=settings.GROQ_MODEL,
+                messages=_groq_messages(message, conversation_history),
+                response_format={'type': 'json_object'},
+                stream=True,
+                timeout=120.0,
+            )
+            for fragment, visible_text in _stream_response_chunks(iterator, 'Groq'):
+                raw_parts.append(fragment)
+                accumulated_raw = ''.join(raw_parts)
+                if not build_status_sent and re.search(r'"roadmap"\s*:\s*\{', accumulated_raw):
+                    yield {'type': 'progress', 'message': 'Building your learning roadmap...'}
+                    build_status_sent = True
+                partial_roadmap = _partial_roadmap(accumulated_raw)
+                if partial_roadmap and len(partial_roadmap['steps']) > partial_step_count:
+                    partial_step_count = len(partial_roadmap['steps'])
+                    yield {'type': 'roadmap', 'roadmap': partial_roadmap}
+                if visible_text:
+                    response_parts.append(visible_text)
+                    yield {'type': 'chunk', 'text': visible_text}
+        except Exception:
+            if iterator and hasattr(iterator, 'close'):
+                iterator.close()
+            yield {'type': 'error', 'message': 'Both AI providers are temporarily unavailable. Please try again shortly.'}
+            return
+
+    try:
+        ai_response, roadmap = _parse_provider_response(''.join(raw_parts), provider)
+        emitted_response = ''.join(response_parts)
+        if ai_response.startswith(emitted_response) and ai_response != emitted_response:
+            remainder = ai_response[len(emitted_response):]
+            yield {'type': 'chunk', 'text': remainder}
+        elif ai_response != emitted_response:
+            raise GeminiResponseError(f'{provider} returned an invalid streamed response.')
+    except GeminiResponseError as exc:
+        yield {'type': 'error', 'message': str(exc)}
+        return
+
+    if roadmap:
+        yield {'type': 'roadmap', 'roadmap': roadmap}
+        if provider == 'Gemini' and settings.SERPER_API_KEY and _roadmap_topics(roadmap):
+            try:
+                for event_type, event_data in _enrich_roadmap_events(client, roadmap, settings.GEMINI_MODEL):
+                    if event_type == 'search':
+                        yield {
+                            'type': 'progress',
+                            'message': f"Searching for relevant resources: {event_data['topic']} ({event_data['index']}/{event_data['total']})...",
+                        }
+                    elif event_type == 'roadmap':
+                        roadmap = event_data
+                        yield {'type': 'roadmap', 'roadmap': roadmap}
+            except Exception as exc:
+                logger.warning(
+                    '[Gemini] Study material search unavailable; returning roadmap without materials (%s).',
+                    type(exc).__name__,
+                )
+    yield {'type': 'done', 'roadmap': roadmap}
 
 
 def _message_field(item, field_name):

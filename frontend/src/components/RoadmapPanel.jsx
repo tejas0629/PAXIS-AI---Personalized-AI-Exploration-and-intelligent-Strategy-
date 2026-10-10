@@ -17,13 +17,14 @@ function ResourceLinks({ material }) {
   );
 }
 
-export default function RoadmapPanel({ roadmap }) {
+export default function RoadmapPanel({ roadmap, progress = '' }) {
   if (!roadmap) {
     return (
       <aside className="roadmapCard empty">
         <div className="emptyIcon">🗺️</div>
         <h2>Your Personalized Learning Path</h2>
-        <p>Tell me your learning goal in the chat and I'll create your roadmap.</p>
+        <p>{progress || "Tell me your learning goal in the chat and I'll create your roadmap."}</p>
+        {progress && <span className="roadmapLoading" role="status"><i /><i /><i /></span>}
         <div className="hint">Note: “SARP can make mistakes while routing. check Information”</div>
       </aside>
     );
@@ -31,6 +32,7 @@ export default function RoadmapPanel({ roadmap }) {
 
   return (
     <aside className="roadmapCard">
+      {progress && <div className="roadmapProgress" role="status">{progress}</div>}
       <div className="roadmapHero">
         <div className="heroIcon">🎯</div>
         <div>

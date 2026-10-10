@@ -1,3 +1,4 @@
+import json
 import os
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -6,8 +7,8 @@ from django.conf import settings
 from django.test import SimpleTestCase, override_settings
 from rest_framework.test import APIRequestFactory
 
-from .services import generate_learning_response
-from .views import ChatAPIView
+from .services import generate_learning_response, stream_learning_response
+from .views import ChatAPIView, ChatStreamAPIView
 
 
 class ProviderConfigurationTests(SimpleTestCase):
@@ -198,6 +199,155 @@ class ProviderFallbackTests(SimpleTestCase):
 
         groq_client.assert_not_called()
 
+    @patch('chat.services.genai.Client')
+    def test_gemini_text_is_yielded_before_provider_stream_finishes(self, gemini_client):
+        consumed = []
+
+        def provider_chunks():
+            consumed.append('first')
+            yield SimpleNamespace(text='{"response":"First words ')
+            consumed.append('remainder')
+            yield SimpleNamespace(text='arrive","roadmap":null}')
+
+        client = Mock()
+        client.models.generate_content_stream.return_value = provider_chunks()
+        gemini_client.return_value = client
+        events = stream_learning_response('Explain this topic.')
+
+        self.assertEqual(next(events)['type'], 'progress')
+        self.assertEqual(next(events), {'type': 'chunk', 'text': 'First words '})
+        self.assertEqual(consumed, ['first'])
+        remaining_events = list(events)
+        self.assertIn({'type': 'chunk', 'text': 'arrive'}, remaining_events)
+        self.assertEqual(remaining_events[-1], {'type': 'done', 'roadmap': None})
+
+    @patch('chat.services.genai.Client')
+    def test_completed_roadmap_step_is_emitted_before_remaining_steps(self, gemini_client):
+        consumed = []
+
+        def provider_chunks():
+            consumed.append('first')
+            yield SimpleNamespace(text=(
+                '{"response":"Starting the plan.","roadmap":{"goal":"Learn Python",'
+                '"steps":[{"title":"Variables","duration":"1 week",'
+                '"description":"Learn basic values.","topics":["Variables"]},'
+            ))
+            consumed.append('remainder')
+            yield SimpleNamespace(text=(
+                '{"title":"Functions","duration":"1 week",'
+                '"description":"Write reusable code.","topics":["Functions"]}],'
+                '"duration":"2 weeks","starting_level":"beginner"}}'
+            ))
+
+        client = Mock()
+        client.models.generate_content_stream.return_value = provider_chunks()
+        gemini_client.return_value = client
+        events = stream_learning_response('Create a Python roadmap.')
+
+        next(events)
+        building_event = next(events)
+        partial_roadmap_event = next(events)
+
+        self.assertEqual(building_event['message'], 'Building your learning roadmap...')
+        self.assertEqual(partial_roadmap_event['type'], 'roadmap')
+        self.assertEqual(partial_roadmap_event['roadmap']['steps'][0]['title'], 'Variables')
+        self.assertEqual(consumed, ['first'])
+
+    @patch('chat.services.Groq')
+    @patch('chat.services.genai.Client')
+    def test_temporary_gemini_failure_uses_groq_stream(self, gemini_client, groq_client):
+        error = RuntimeError('temporarily unavailable')
+        error.status_code = 503
+        gemini = Mock()
+        gemini.models.generate_content_stream.side_effect = error
+        gemini_client.return_value = gemini
+        groq = Mock()
+        groq.chat.completions.create.return_value = iter([
+            SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content='{"response":"Groq '))]),
+            SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content='stream","roadmap":null}'))]),
+        ])
+        groq_client.return_value = groq
+
+        events = list(stream_learning_response('Explain this topic.'))
+
+        self.assertIn({'type': 'chunk', 'text': 'Groq '}, events)
+        self.assertIn({'type': 'chunk', 'text': 'stream'}, events)
+        self.assertEqual(events[-1], {'type': 'done', 'roadmap': None})
+        self.assertTrue(groq.chat.completions.create.call_args.kwargs['stream'])
+
+    @patch('chat.services.requests.post')
+    @patch('chat.services.genai.Client')
+    def test_roadmap_and_topic_search_progress_are_emitted_as_work_advances(self, gemini_client, serper_post):
+        roadmap = {
+            'goal': 'Learn Java',
+            'steps': [
+                {'title': 'Syntax', 'topics': ['Variables']},
+                {'title': 'Objects', 'topics': ['Classes']},
+            ],
+        }
+        client = Mock()
+        client.models.generate_content_stream.return_value = iter([
+            SimpleNamespace(text=json.dumps({'response': 'Roadmap ready.', 'roadmap': roadmap})),
+        ])
+        client.models.generate_content.return_value = SimpleNamespace(text='{"topics":[]}')
+        gemini_client.return_value = client
+        serper_post.return_value = Mock(status_code=200, json=lambda: {'organic': []}, raise_for_status=Mock())
+
+        with patch('chat.services.settings.SERPER_API_KEY', 'serper-test-key'):
+            events = list(stream_learning_response('Create a Java roadmap.'))
+
+        event_types = [event['type'] for event in events]
+        search_events = [event for event in events if event['type'] == 'progress' and event['message'].startswith('Searching')]
+        first_roadmap_index = event_types.index('roadmap')
+        first_search_index = events.index(search_events[0])
+        self.assertEqual(len(search_events), 2)
+        self.assertLess(first_roadmap_index, first_search_index)
+        self.assertIn('Variables (1/2)', search_events[0]['message'])
+        self.assertIn('Classes (2/2)', search_events[1]['message'])
+        self.assertEqual(serper_post.call_count, 4)
+
+    @patch('chat.services.genai.Client')
+    def test_empty_provider_stream_returns_clear_error(self, gemini_client):
+        client = Mock()
+        client.models.generate_content_stream.return_value = iter([])
+        gemini_client.return_value = client
+
+        events = list(stream_learning_response('Explain this topic.'))
+
+        self.assertEqual(events[-1]['type'], 'error')
+        self.assertIn('empty response', events[-1]['message'])
+
+    @patch('chat.services.genai.Client')
+    def test_closing_stream_closes_provider_iterator(self, gemini_client):
+        class ProviderStream:
+            def __init__(self):
+                self.closed = False
+                self.chunks = iter([
+                    SimpleNamespace(text='{"response":"Visible '),
+                    SimpleNamespace(text='text","roadmap":null}'),
+                ])
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return next(self.chunks)
+
+            def close(self):
+                self.closed = True
+
+        provider_stream = ProviderStream()
+        client = Mock()
+        client.models.generate_content_stream.return_value = provider_stream
+        gemini_client.return_value = client
+        events = stream_learning_response('Explain this topic.')
+
+        next(events)
+        next(events)
+        events.close()
+
+        self.assertTrue(provider_stream.closed)
+
 
 @override_settings(
     GEMINI_API_KEY='gemini-test-key',
@@ -234,3 +384,27 @@ class StatelessConversationApiTests(SimpleTestCase):
                 {'role': 'assistant', 'message': 'Java response.'},
             ],
         )
+
+
+class StreamingApiTests(SimpleTestCase):
+    @patch('chat.views.stream_learning_response')
+    def test_stream_endpoint_returns_sse_events(self, stream_response):
+        stream_response.return_value = iter([
+            {'type': 'progress', 'message': 'Understanding your learning goal...'},
+            {'type': 'chunk', 'text': 'Hello'},
+            {'type': 'done', 'roadmap': None},
+        ])
+        request = APIRequestFactory().post(
+            '/api/chat/stream/',
+            {'message': 'Hello', 'conversation_id': 'stream-conversation'},
+            format='json',
+        )
+
+        response = ChatStreamAPIView.as_view()(request)
+        body = b''.join(response.streaming_content).decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response['Content-Type'], 'text/event-stream')
+        self.assertEqual(response['X-Accel-Buffering'], 'no')
+        self.assertIn('"text": "Hello"', body)
+        self.assertIn('"conversation_id": "stream-conversation"', body)

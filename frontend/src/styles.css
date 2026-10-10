@@ -198,6 +198,65 @@ h1 {
 	font-weight: 700;
 }
 
+.typingIndicator,
+.roadmapLoading {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	min-height: 12px;
+}
+
+.typingIndicator i,
+.roadmapLoading i {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: #8b5cf6;
+	animation: typingPulse 1s ease-in-out infinite;
+}
+
+.typingIndicator i:nth-child(2),
+.roadmapLoading i:nth-child(2) {
+	animation-delay: .15s;
+}
+
+.typingIndicator i:nth-child(3),
+.roadmapLoading i:nth-child(3) {
+	animation-delay: .3s;
+}
+
+.streamStatus {
+	margin-top: 9px;
+	color: #77799a;
+	font-size: 12px;
+	line-height: 1.4;
+}
+
+.stoppedStatus {
+	color: #77799a;
+}
+
+.composer .stopButton {
+	background: #fff1f2;
+	color: #be123c;
+}
+
+.roadmapProgress {
+	margin-bottom: 14px;
+	color: #6d28d9;
+	font-size: 13px;
+	font-weight: 700;
+}
+
+.roadmapLoading {
+	margin-top: 12px;
+}
+
+@keyframes typingPulse {
+	0%, 60%, 100% { opacity: .35; transform: translateY(0); }
+	30% { opacity: 1; transform: translateY(-3px); }
+}
+
 .errorBox {
 	margin: 0 26px 14px;
 	padding: 12px 14px;

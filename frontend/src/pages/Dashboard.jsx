@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Header from '../components/Header.jsx';
 import ChatPanel from '../components/ChatPanel.jsx';
 import RoadmapPanel from '../components/RoadmapPanel.jsx';
-import { sendChatMessage } from '../services/chatApi.js';
+import { streamChatMessage } from '../services/chatApi.js';
 import {
   clearConversation,
   loadConversations,
@@ -35,6 +35,7 @@ export default function Dashboard() {
   const [conversationId, setConversationId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const activeRequestRef = useRef(null);
 
   useEffect(() => {
     let active = true;
@@ -61,6 +62,7 @@ export default function Dashboard() {
   const handleSend = async (content) => {
     const activeConversationId = conversationId || createId();
     const now = new Date().toISOString();
+    const assistantMessageId = createId();
     const userMessage = {
       id: createId(),
       conversationId: activeConversationId,
@@ -68,8 +70,20 @@ export default function Dashboard() {
       content,
       createdAt: now,
     };
+    const assistantMessage = {
+      id: assistantMessageId,
+      conversationId: activeConversationId,
+      role: 'assistant',
+      content: '',
+      status: 'Understanding your learning goal...',
+      streaming: true,
+      createdAt: now,
+    };
     const nextMessages = [...messages, userMessage];
-    setMessages(nextMessages);
+    const request = { controller: new AbortController(), assistantMessageId };
+    activeRequestRef.current = request;
+    let accumulatedResponse = '';
+    setMessages([...nextMessages, assistantMessage]);
     setConversationId(activeConversationId);
     setLoading(true);
     setError('');
@@ -79,34 +93,82 @@ export default function Dashboard() {
         saveConversation({ id: activeConversationId, updatedAt: now }),
         saveMessage(userMessage),
       ]);
-      const data = await sendChatMessage(
+      const data = await streamChatMessage(
         content,
         activeConversationId,
         nextMessages.map(({ role, content: messageContent }) => ({ role, message: messageContent })),
+        (event) => {
+          if (event.type === 'chunk') {
+            accumulatedResponse += event.text;
+            setMessages((current) => current.map((message) => (
+              message.id === assistantMessageId
+                ? { ...message, content: accumulatedResponse }
+                : message
+            )));
+          } else if (event.type === 'progress') {
+            setMessages((current) => current.map((message) => (
+              message.id === assistantMessageId
+                ? { ...message, status: event.message }
+                : message
+            )));
+          } else if (event.type === 'roadmap') {
+            setRoadmap(event.roadmap);
+            saveRoadmap(activeConversationId, event.roadmap).catch(() => {});
+          }
+        },
+        request.controller.signal,
       );
-      const assistantMessage = {
-        id: createId(),
-        conversationId: activeConversationId,
-        role: 'assistant',
-        content: data.response,
+      const completedMessage = {
+        ...assistantMessage,
+        content: accumulatedResponse,
+        status: '',
+        streaming: false,
         createdAt: new Date().toISOString(),
       };
-      setMessages((current) => [...current, assistantMessage]);
+      setMessages((current) => current.map((message) => (
+        message.id === assistantMessageId ? completedMessage : message
+      )));
       await Promise.all([
-        saveMessage(assistantMessage),
+        saveMessage(completedMessage),
         saveConversation({ id: activeConversationId, updatedAt: new Date().toISOString() }),
         ...(data.roadmap ? [saveRoadmap(activeConversationId, data.roadmap)] : []),
       ]);
       setConversationId(data.conversation_id || activeConversationId);
       if (data.roadmap) setRoadmap(data.roadmap);
     } catch (err) {
-      setError(err.message || 'Unable to reach the learning assistant.');
+      if (activeRequestRef.current !== request) return;
+      const cancelled = request.controller.signal.aborted;
+      if (accumulatedResponse) {
+        const partialMessage = {
+          ...assistantMessage,
+          content: accumulatedResponse,
+          status: cancelled ? 'Generation stopped.' : '',
+          streaming: false,
+          createdAt: new Date().toISOString(),
+        };
+        setMessages((current) => current.map((message) => (
+          message.id === assistantMessageId ? partialMessage : message
+        )));
+        await saveMessage(partialMessage).catch(() => {});
+      } else {
+        setMessages((current) => current.filter((message) => message.id !== assistantMessageId));
+      }
+      if (!cancelled) setError(err.message || 'Unable to reach the learning assistant.');
     } finally {
-      setLoading(false);
+      if (activeRequestRef.current === request) {
+        activeRequestRef.current = null;
+        setLoading(false);
+      }
     }
   };
 
+  const handleCancel = () => activeRequestRef.current?.controller.abort();
+
   const handleClear = async () => {
+    const activeRequest = activeRequestRef.current;
+    activeRequestRef.current = null;
+    activeRequest?.controller.abort();
+    setLoading(false);
     if (conversationId) {
       try {
         await clearConversation(conversationId);
@@ -120,6 +182,10 @@ export default function Dashboard() {
     setError('');
   };
 
+  const activeProgress = loading
+    ? [...messages].reverse().find((message) => message.streaming)?.status || ''
+    : '';
+
   return (
     <>
       <Header />
@@ -128,10 +194,11 @@ export default function Dashboard() {
           messages={messages}
           onSend={handleSend}
           onClear={handleClear}
+          onCancel={handleCancel}
           loading={loading}
           error={error}
         />
-        <RoadmapPanel roadmap={roadmap} />
+        <RoadmapPanel roadmap={roadmap} progress={activeProgress} />
       </main>
     </>
   );

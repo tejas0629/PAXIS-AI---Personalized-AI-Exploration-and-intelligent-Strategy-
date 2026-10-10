@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 
-export default function ChatPanel({ messages, onSend, onClear, loading, error }) {
+export default function ChatPanel({ messages, onSend, onClear, onCancel, loading, error }) {
   const [text, setText] = useState('');
-  const endRef = useRef(null);
+  const messagesRef = useRef(null);
+  const stickToBottomRef = useRef(true);
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const container = messagesRef.current;
+    if (container && stickToBottomRef.current) container.scrollTop = container.scrollHeight;
   }, [messages, loading]);
   const submit = (event) => {
     event.preventDefault();
@@ -22,25 +24,40 @@ export default function ChatPanel({ messages, onSend, onClear, loading, error })
         </div>
         <button className="ghostBtn" onClick={onClear}>🗑️ Clear Chat</button>
       </div>
-      <div className="messages">
+      <div
+        className="messages"
+        ref={messagesRef}
+        onScroll={(event) => {
+          const container = event.currentTarget;
+          stickToBottomRef.current = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
+        }}
+      >
         {messages.map((m) => (
           <div className={`messageRow ${m.role}`} key={m.id}>
             <div className="bubbleAvatar">{m.role === 'assistant' ? '🤖' : '👤'}</div>
-            <div className="bubble"><pre>{m.content}</pre></div>
+            <div className="bubble">
+              <pre>{m.content}</pre>
+              {m.streaming && !m.content && (
+                <span className="typingIndicator" role="status" aria-label="Assistant is responding">
+                  <i /><i /><i />
+                </span>
+              )}
+              {m.streaming && m.status && <div className="streamStatus">{m.status}</div>}
+              {!m.streaming && m.status && <div className="streamStatus stoppedStatus">{m.status}</div>}
+            </div>
           </div>
         ))}
-        {loading && (
-          <div className="messageRow assistant">
-            <div className="bubbleAvatar">🤖</div>
-            <div className="bubble typing">Creating your roadmap...</div>
-          </div>
-        )}
-        <div ref={endRef} />
       </div>
-      {error && <div className="errorBox">{error}</div>}
+      {error && <div className="errorBox" role="alert">{error}</div>}
       <form className="composer" onSubmit={submit}>
         <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Type your message..." />
-        <button disabled={loading || !text.trim()}>➤ Send</button>
+        {loading ? (
+          <button type="button" className="stopButton" onClick={onCancel} aria-label="Stop generating">
+            <span aria-hidden="true">■</span> Stop
+          </button>
+        ) : (
+          <button type="submit" disabled={!text.trim()}><span aria-hidden="true">➤</span> Send</button>
+        )}
       </form>
     </section>
   );

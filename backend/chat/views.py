@@ -1,3 +1,6 @@
+import json
+
+from django.http import StreamingHttpResponse
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -9,6 +12,7 @@ from .services import (
     GroqConfigurationError,
     GroqResponseError,
     generate_learning_response,
+    stream_learning_response,
 )
 
 
@@ -45,3 +49,26 @@ class ChatAPIView(APIView):
         if roadmap:
             payload['roadmap'] = roadmap
         return Response(payload)
+
+
+class ChatStreamAPIView(APIView):
+    def post(self, request):
+        serializer = ChatRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        conversation_id = data.get('conversation_id') or None
+        history = [
+            {'role': item['role'], 'message': item['message']}
+            for item in data.get('messages', [])
+        ]
+
+        def events():
+            for event in stream_learning_response(data['message'], history):
+                if event['type'] == 'done':
+                    event['conversation_id'] = conversation_id
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+        response = StreamingHttpResponse(events(), content_type='text/event-stream')
+        response['Cache-Control'] = 'no-cache, no-transform'
+        response['X-Accel-Buffering'] = 'no'
+        return response
